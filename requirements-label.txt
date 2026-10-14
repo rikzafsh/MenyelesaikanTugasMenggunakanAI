@@ -1,0 +1,4 @@
+# Hanya untuk menjalankan label_sentiment.py (pelabelan sentimen, sekali jalan)
+pandas>=2.0
+transformers>=4.40
+torch>=2.2
