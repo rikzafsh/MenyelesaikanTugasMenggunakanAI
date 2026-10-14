@@ -14,6 +14,7 @@ import altair as alt
 import numpy as np
 import pandas as pd
 import streamlit as st
+from wordcloud import WordCloud
 from sklearn.decomposition import PCA
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LinearRegression
@@ -183,6 +184,16 @@ def analisis_cluster(path: str):
     return {"data": d, "ids": ids, "kata": kata, "silhouette": sil, "sil_cluster": sil_cluster,
             "titik_pusat": titik_pusat, "var_pca": float(pca.explained_variance_ratio_.sum()),
             "n_fitur": int(X.shape[1])}
+
+
+@st.cache_data(show_spinner=False)
+def buat_wordcloud(teks: str, colormap: str = "viridis"):
+    """Word cloud dari teks bersih (ukuran kata = frekuensi). Mengembalikan (gambar, 5 kata teratas)."""
+    if not teks.strip():
+        return None, []
+    wc = WordCloud(stopwords=set(), background_color="black", max_words=500, width=800, height=400,
+                   collocations=False, colormap=colormap, random_state=42).generate(teks)
+    return wc.to_array(), list(wc.words_.keys())[:5]
 
 
 def grafik_bobot_kata(df_kata: pd.DataFrame, warna: str) -> alt.Chart:
@@ -695,6 +706,27 @@ with tab_cluster:
                 st.markdown(f"**Cluster {i}**")
                 st.altair_chart(grafik_bobot_kata(hasil_cluster["kata"][i], warna_c[f"Cluster {i}"]),
                                 width="stretch")
+
+        # ---- word cloud
+        st.divider()
+        st.subheader("Word cloud")
+        st.caption("Ukuran kata menunjukkan frekuensi kemunculan pada teks bersih (setelah stopword dibuang "
+                   "dan stemming). Grafik batang di atas memakai bobot TF-IDF sehingga urutannya bisa sedikit berbeda.")
+        peta_warna = {"Semua": "viridis", **{f"Cluster {i}": cm for i, cm in
+                                            zip(ids, ["Blues", "Oranges", "Purples", "GnBu", "Reds"])}}
+        tab_wc = st.tabs(list(peta_warna))
+        for tab_i, nama_wc in zip(tab_wc, peta_warna):
+            with tab_i:
+                if nama_wc == "Semua":
+                    teks_wc = " ".join(dc["clean_cluster"].astype(str))
+                else:
+                    teks_wc = " ".join(dc.loc[dc["nama"] == nama_wc, "clean_cluster"].astype(str))
+                gambar, top5_wc = buat_wordcloud(teks_wc, peta_warna[nama_wc])
+                if gambar is None:
+                    st.caption("Tidak ada teks.")
+                else:
+                    st.image(gambar, width="stretch")
+                    st.caption("5 kata teratas: " + ", ".join(top5_wc))
 
         # ---- contoh postingan
         st.divider()

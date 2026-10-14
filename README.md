@@ -67,7 +67,8 @@ lalu letakkan kedua file di folder `data/`.
 - Pengelompokan tema memakai pembersihan + stemming Sastrawi, **TF-IDF** (`max_df=0.8`, `min_df=2`) dan
   **K-Means 3 cluster** (`random_state=42`), sama dengan notebook.
 - Dashboard menampilkan ukuran cluster, tema dan kata dominan, contoh postingan paling dekat ke pusat cluster,
-  skor silhouette, proyeksi PCA 2D, dan komposisi sentimen per cluster (bila hasil sentimen tersedia).
+  skor silhouette, proyeksi PCA 2D, **word cloud** (keseluruhan dan per cluster), dan komposisi sentimen per cluster
+  (bila hasil sentimen tersedia).
 - Yang dibaca dashboard hanya kolom `text`, `clean_cluster`, `cluster` (opsional `tema`, `like_count`), jadi
   `hasil_clustering.csv` dari notebook dapat dipakai langsung. Silhouette, kata dominan, dan PCA dihitung ulang
   di dashboard dari kolom tersebut.
