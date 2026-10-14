@@ -36,7 +36,10 @@ LABEL_MANUAL = [
 def main() -> None:
     from transformers import AutoModelForSequenceClassification, AutoTokenizer, pipeline
 
-    df = pd.read_csv(IN_PATH)
+    with open(IN_PATH, encoding="utf-8-sig") as f:
+        header = f.readline()
+    sep = max((",", "|", ";", "\t"), key=header.count)  # notebook menyimpan CSV dengan pemisah '|'
+    df = pd.read_csv(IN_PATH, sep=sep)
     print(f"Memuat {len(df)} postingan dari {IN_PATH}")
 
     tokenizer = AutoTokenizer.from_pretrained(PRETRAINED)
@@ -50,7 +53,11 @@ def main() -> None:
     print(f"Tersimpan: {OUT_SENTIMENT}")
     print(df["sentiment"].value_counts())
 
-    # Evaluasi manual 20 sampel
+    # Evaluasi manual 20 sampel (label manual hanya cocok untuk dataset 192 baris di notebook)
+    if len(df) != 192:
+        print(f"Dataset berisi {len(df)} baris (bukan 192): evaluasi manual dilewati karena "
+              "label manual disusun untuk dataset 192 baris.")
+        return
     sampel = df.sample(n=20, random_state=42)[["text", "sentiment"]].copy()
     sampel["label_manual"] = LABEL_MANUAL
     sampel["isCocok"] = (sampel["sentiment"] == sampel["label_manual"]).map({True: "Ya", False: "Tidak"})

@@ -4,7 +4,7 @@ Aplikasi Streamlit untuk menampilkan hasil analisis postingan X berbahasa Indone
 penggunaan AI untuk membuat dan menyelesaikan tugas kuliah. Aplikasi membaca dataset CSV yang
 sudah disiapkan (tidak ada pengambilan data real-time).
 
-**Status saat ini:** tab **Data** dan **Sentimen**. Tab Clustering dan Regresi belum ditambahkan.
+**Status saat ini:** tab **Data**, **Sentimen**, dan **Regresi**. Tab Clustering belum ditambahkan.
 
 ## Struktur folder
 
@@ -12,11 +12,13 @@ sudah disiapkan (tidak ada pengambilan data real-time).
 .
 ├── app.py                    # aplikasi Streamlit
 ├── label_sentiment.py        # pelabelan sentimen (jalankan sekali)
+├── model/
+│   └── model_regresi_ai.joblib   # model regresi linear (reply, retweet -> likes)
 ├── requirements.txt          # dependensi aplikasi (ringan)
 ├── requirements-label.txt    # dependensi tambahan untuk label_sentiment.py
 ├── README.md
 └── data/
-    ├── data_clean.csv            # dataset bersih (192 postingan)
+    ├── data_clean.csv            # dataset bersih (192 postingan); koma atau '|' keduanya dibaca
     ├── data_sentiment.csv        # dibuat oleh label_sentiment.py
     └── evaluasi_sentiment.csv    # dibuat oleh label_sentiment.py
 ```
@@ -53,9 +55,21 @@ lalu letakkan kedua file di folder `data/`.
 
 | Berkas | Kolom wajib |
 |---|---|
-| `data_clean.csv` | `text`, `clean_text`, `like_count`, `hashtag_count`, `created_at` |
+| `data_clean.csv` | `text`, `clean_text`, `like_count`, `hashtag_count`, `created_at`; untuk evaluasi regresi tambahkan `reply_count`, `retweet_count` |
 | `data_sentiment.csv` | kolom di atas + `sentiment` (`positive`/`neutral`/`negative`), `sentiment_score` (opsional) |
 | `evaluasi_sentiment.csv` | `text`, `sentiment` (prediksi sistem), `label_manual` |
+
+## Tab Regresi
+
+- Model: regresi linear berganda, **X1 = `reply_count`, X2 = `retweet_count`, Y = `like_count`**
+  (sesuai notebook), data latih/uji 80:20 dengan `random_state=42`.
+- **Simulasi:** isi jumlah reply dan retweet, dashboard menampilkan prediksi likes memakai
+  `model/model_regresi_ai.joblib` (tidak butuh dataset).
+- **Evaluasi (MAE, R², heatmap korelasi, grafik aktual vs prediksi, tabel data uji):** dihitung langsung
+  bila `data/data_clean.csv` memuat kolom `reply_count` dan `retweet_count` (versi 7 kolom dari notebook).
+  Bila belum, dashboard menampilkan hasil dari notebook (MAE 81,19; R² 0,5916) dengan keterangan.
+- Model disimpan dengan scikit-learn 1.6.1; versi yang lebih baru tetap dapat memuatnya
+  (peringatan versi disembunyikan). Jika gagal dimuat, samakan dengan `pip install scikit-learn==1.6.1`.
 
 ## Metode singkat
 
@@ -63,3 +77,4 @@ lalu letakkan kedua file di folder `data/`.
   kata negasi dipertahankan; postingan promosi joki dan di luar topik dibuang.
 - **Sentimen:** model pre-trained `mdhugol/indonesia-bert-sentiment-classification` pada `clean_text`,
   divalidasi manual pada 20 sampel acak (`random_state=42`).
+- **Regresi linear berganda:** `LinearRegression` (scikit-learn), dievaluasi dengan MAE dan R² pada 20% data uji.

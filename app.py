@@ -2,17 +2,22 @@
 Dashboard Analisis Sentimen dan Tema Pembahasan Penggunaan AI untuk Membuat
 dan Menyelesaikan Tugas pada Postingan X Berbahasa Indonesia.
 
-Versi saat ini: tab Data dan Sentimen.
-(Tab Clustering dan Regresi akan ditambahkan kemudian.)
+Versi saat ini: tab Data, Sentimen, dan Regresi.
+(Tab Clustering akan ditambahkan kemudian.)
 
 Jalankan:  streamlit run app.py
 """
+import warnings
 from collections import Counter
 from pathlib import Path
 
 import altair as alt
+import numpy as np
 import pandas as pd
 import streamlit as st
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.model_selection import train_test_split
 
 # --------------------------------------------------------------------------
 # Konfigurasi
@@ -21,6 +26,22 @@ BASE = Path(__file__).parent
 PATH_CLEAN = BASE / "data" / "data_clean.csv"
 PATH_SENTIMENT = BASE / "data" / "data_sentiment.csv"
 PATH_EVAL = BASE / "data" / "evaluasi_sentiment.csv"
+PATH_MODEL = BASE / "model" / "model_regresi_ai.joblib"
+
+# Regresi: X1 = reply_count, X2 = retweet_count, Y = like_count (sesuai notebook)
+FITUR_REGRESI = ["reply_count", "retweet_count"]
+TARGET_REGRESI = "like_count"
+LABEL_FITUR = {"reply_count": "Jumlah reply", "retweet_count": "Jumlah retweet",
+               "like_count": "Jumlah likes"}
+
+# Hasil dari notebook (dipakai hanya bila dataset belum memuat reply_count/retweet_count).
+HASIL_NOTEBOOK = {
+    "mae": 81.19,
+    "r2": 0.5916,
+    "korelasi": {("like_count", "reply_count"): 0.91,
+                 ("like_count", "retweet_count"): 0.98,
+                 ("reply_count", "retweet_count"): 0.88},
+}
 
 URUTAN_SENTIMEN = ["positive", "neutral", "negative"]
 LABEL_ID = {"positive": "Positif", "neutral": "Netral", "negative": "Negatif"}
@@ -42,11 +63,11 @@ sangat sekali pake pakai pakek pas lalu terus dulu yaa ya iya
 # Pemuat data
 # --------------------------------------------------------------------------
 def _baca_csv(path: Path) -> pd.DataFrame:
-    """Baca CSV; coba pemisah koma, lalu '|' (format simpanan notebook)."""
-    df = pd.read_csv(path)
-    if "clean_text" not in df.columns:
-        df = pd.read_csv(path, sep="|")
-    return df
+    """Baca CSV dengan pemisah otomatis (koma atau '|', format simpanan notebook)."""
+    with open(path, encoding="utf-8-sig") as f:
+        header = f.readline()
+    sep = max((",", "|", ";", "\t"), key=header.count)
+    return pd.read_csv(path, sep=sep)
 
 
 @st.cache_data(show_spinner=False)
@@ -78,21 +99,10 @@ def muat_evaluasi(path: str) -> pd.DataFrame | None:
     p = Path(path)
     if not p.exists():
         return None
-    df = _baca_csv_bebas(p)
-    if df is None or not {"sentiment", "label_manual"}.issubset(df.columns):
+    df = _baca_csv(p)
+    if not {"sentiment", "label_manual"}.issubset(df.columns):
         return None
     return df
-
-
-def _baca_csv_bebas(path: Path) -> pd.DataFrame | None:
-    for sep in (",", "|"):
-        try:
-            df = pd.read_csv(path, sep=sep)
-            if df.shape[1] > 1:
-                return df
-        except Exception:
-            continue
-    return None
 
 
 def kata_teratas(teks: pd.Series, n: int = 15) -> pd.DataFrame:
@@ -113,6 +123,73 @@ def grafik_batang_kata(df_kata: pd.DataFrame, warna: str) -> alt.Chart:
         )
         .properties(height=alt.Step(22))
     )
+
+
+@st.cache_resource(show_spinner=False)
+def muat_model(path: str):
+    """Muat model regresi tersimpan (joblib). Mengembalikan None bila gagal."""
+    p = Path(path)
+    if not p.exists():
+        return None
+    try:
+        import joblib
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # model disimpan dengan versi scikit-learn lain
+            model = joblib.load(p)
+        if not hasattr(model, "coef_") or not hasattr(model, "intercept_"):
+            return None
+        return model
+    except Exception:
+        return None
+
+
+def prediksi_manual(model, nilai: list[float]) -> float:
+    """Regresi linear = intersep + jumlah(koefisien x nilai)."""
+    return float(model.intercept_ + np.dot(np.ravel(model.coef_), nilai))
+
+
+def matriks_korelasi_notebook() -> pd.DataFrame:
+    nama = ["like_count", "reply_count", "retweet_count"]
+    m = pd.DataFrame(np.eye(3), index=nama, columns=nama)
+    for (a, b), r in HASIL_NOTEBOOK["korelasi"].items():
+        m.loc[a, b] = m.loc[b, a] = r
+    return m
+
+
+def grafik_korelasi(korelasi: pd.DataFrame) -> alt.Chart:
+    panjang = (korelasi.rename_axis("x").reset_index()
+               .melt(id_vars="x", var_name="y", value_name="r"))
+    dasar = alt.Chart(panjang).encode(x=alt.X("x:N", title=None, axis=alt.Axis(labelAngle=0)),
+                                      y=alt.Y("y:N", title=None))
+    kotak = dasar.mark_rect().encode(
+        color=alt.Color("r:Q", scale=alt.Scale(domain=[-1, 1], scheme="redblue", reverse=True),
+                        legend=alt.Legend(title="Korelasi")),
+        tooltip=["x", "y", alt.Tooltip("r:Q", format=".2f")],
+    )
+    angka = dasar.mark_text(fontSize=14).encode(
+        text=alt.Text("r:Q", format=".2f"),
+        color=alt.condition("abs(datum.r) > 0.5", alt.value("white"), alt.value("black")),
+    )
+    return (kotak + angka).properties(height=260)
+
+
+def evaluasi_regresi(data: pd.DataFrame, model):
+    """Bagi data 80:20 (random_state=42, sama dengan notebook) lalu evaluasi model tersimpan."""
+    d = data.dropna(subset=FITUR_REGRESI + [TARGET_REGRESI])
+    X, y = d[FITUR_REGRESI], d[TARGET_REGRESI]
+    X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+    pred = X_te.to_numpy() @ np.ravel(model.coef_) + float(model.intercept_)
+    # Cek: apakah pelatihan ulang pada data ini menghasilkan koefisien yang sama dengan model tersimpan?
+    ulang = LinearRegression().fit(X_tr, y_tr)
+    sama = bool(np.allclose(ulang.coef_, model.coef_, rtol=1e-4)
+                and np.isclose(ulang.intercept_, model.intercept_, rtol=1e-4))
+    hasil = X_te.copy()
+    hasil["aktual"], hasil["prediksi"] = y_te, pred
+    hasil["selisih"] = hasil["prediksi"] - hasil["aktual"]
+    hasil["text"] = d.loc[hasil.index, "text"]
+    return {"mae": mean_absolute_error(y_te, pred), "r2": r2_score(y_te, pred),
+            "n_latih": len(X_tr), "n_uji": len(X_te), "sama": sama,
+            "hasil": hasil, "korelasi": d[[TARGET_REGRESI] + FITUR_REGRESI].corr()}
 
 
 # --------------------------------------------------------------------------
@@ -137,6 +214,8 @@ if not PATH_CLEAN.exists():
 
 df = muat_data(str(PATH_CLEAN))
 df_sent = muat_sentimen(str(PATH_SENTIMENT))
+model_reg = muat_model(str(PATH_MODEL))
+ada_data_regresi = set(FITUR_REGRESI + [TARGET_REGRESI]).issubset(df.columns)
 
 with st.sidebar:
     st.header("Tentang dashboard")
@@ -148,8 +227,10 @@ with st.sidebar:
     st.markdown(f"- Data bersih: {'✅' if PATH_CLEAN.exists() else '❌'}")
     st.markdown(f"- Hasil sentimen: {'✅' if df_sent is not None else '❌ belum ada'}")
     st.markdown(f"- Evaluasi sentimen: {'✅' if PATH_EVAL.exists() else '❌ belum ada'}")
+    st.markdown(f"- Model regresi: {'✅' if model_reg is not None else '❌ belum ada'}")
+    st.markdown(f"- Data reply/retweet: {'✅' if ada_data_regresi else '❌ belum ada'}")
 
-tab_data, tab_sentimen = st.tabs(["Data", "Sentimen"])
+tab_data, tab_sentimen, tab_regresi = st.tabs(["Data", "Sentimen", "Regresi"])
 
 # ==========================================================================
 # TAB DATA
@@ -433,3 +514,132 @@ with tab_sentimen:
             "Catatan: label sentimen berasal dari model pre-trained, sehingga dapat keliru pada "
             "bahasa gaul, singkatan, sarkasme, dan teks yang memuat beberapa target opini sekaligus."
         )
+
+
+# ==========================================================================
+# TAB REGRESI
+# ==========================================================================
+with tab_regresi:
+    st.subheader("Regresi linear berganda: memperkirakan jumlah likes")
+    st.markdown(
+        "Model memperkirakan **jumlah likes (Y)** dari **jumlah reply (X1)** dan "
+        "**jumlah retweet (X2)**. Data dibagi 80% latih dan 20% uji (`random_state=42`)."
+    )
+
+    if model_reg is None:
+        st.error(f"Model tidak dapat dimuat dari `{PATH_MODEL.relative_to(BASE)}`. "
+                 "Pastikan file ada dan `scikit-learn` terpasang.")
+    else:
+        koef = np.ravel(model_reg.coef_)
+        intersep = float(model_reg.intercept_)
+
+        # ---- Persamaan model ------------------------------------------------
+        st.markdown("**Persamaan model**")
+        st.latex(rf"\hat{{Y}} = {intersep:.2f} + {koef[0]:.2f}\,X_1 + {koef[1]:.2f}\,X_2")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Intersep", f"{intersep:.2f}")
+        c2.metric("Koefisien reply (X1)", f"{koef[0]:.2f}")
+        c3.metric("Koefisien retweet (X2)", f"{koef[1]:.2f}")
+        st.caption(
+            "Koefisien menunjukkan perubahan rata-rata likes untuk tambahan satu reply atau satu retweet, "
+            "dengan variabel lain tetap. Ini hubungan statistik, bukan sebab-akibat; reply dan retweet "
+            "saling berkorelasi tinggi sehingga pengaruh masing-masing sulit dipisahkan."
+        )
+
+        # ---- Simulasi ---------------------------------------------------------
+        st.divider()
+        st.subheader("Simulasi prediksi")
+        with st.form("form_simulasi"):
+            f1, f2 = st.columns(2)
+            reply = f1.number_input("Jumlah reply (X1)", min_value=0, value=5, step=1)
+            retweet = f2.number_input("Jumlah retweet (X2)", min_value=0, value=10, step=1)
+            kirim = st.form_submit_button("Prediksi likes")
+
+        mentah = prediksi_manual(model_reg, [reply, retweet])
+        hasil_pred = max(0, round(mentah))
+        p1, p2 = st.columns([1, 2])
+        p1.metric("Prediksi jumlah likes", f"{hasil_pred}")
+        with p2:
+            rincian = pd.DataFrame({
+                "Komponen": ["Intersep", f"Reply: {reply} × {koef[0]:.2f}",
+                             f"Retweet: {retweet} × {koef[1]:.2f}", "Total (mentah)"],
+                "Nilai": [intersep, reply * koef[0], retweet * koef[1], mentah],
+            })
+            st.dataframe(rincian.style.format({"Nilai": "{:.2f}"}), hide_index=True, width="stretch")
+        if mentah < 0:
+            st.caption("Hasil mentah model negatif (intersep negatif dan masukan kecil), "
+                       "sehingga ditampilkan 0 karena likes tidak mungkin negatif.")
+        st.caption("Prediksi akan kurang andal untuk nilai di luar rentang data latih.")
+
+        # ---- Evaluasi ---------------------------------------------------------
+        st.divider()
+        st.subheader("Evaluasi model")
+
+        med_likes = df["like_count"].median()
+        if ada_data_regresi:
+            ev = evaluasi_regresi(df, model_reg)
+            mae, r2, korelasi = ev["mae"], ev["r2"], ev["korelasi"]
+            if not ev["sama"]:
+                st.warning(
+                    "Koefisien hasil pelatihan ulang pada dataset ini berbeda dari model tersimpan, "
+                    "jadi dataset ini kemungkinan bukan data yang dipakai melatih model. "
+                    "Metrik di bawah dihitung dari model tersimpan pada 20% data uji dataset ini."
+                )
+            st.caption(f"Data latih {ev['n_latih']} postingan, data uji {ev['n_uji']} postingan.")
+        else:
+            mae, r2, korelasi, ev = HASIL_NOTEBOOK["mae"], HASIL_NOTEBOOK["r2"], matriks_korelasi_notebook(), None
+            st.info(
+                "Dataset yang dimuat belum memiliki kolom `reply_count` dan `retweet_count`, "
+                "sehingga angka di bawah adalah **hasil dari notebook**. Ganti `data/data_clean.csv` "
+                "dengan versi 7 kolom (yang memuat kedua kolom itu) agar evaluasi, grafik, dan tabel "
+                "dihitung langsung di dashboard."
+            )
+
+        m1, m2 = st.columns(2)
+        m1.metric("MAE", f"{mae:.2f}", help="Rata-rata selisih absolut antara likes aktual dan prediksi.")
+        m2.metric("R²", f"{r2:.4f}", help="Proporsi variasi likes yang dijelaskan model (maks. 1).")
+        st.caption(
+            f"R² {r2:.2f} berarti sekitar {r2 * 100:.0f}% variasi likes pada data uji dijelaskan model. "
+            f"MAE {mae:.0f} likes jauh di atas median likes dataset ({med_likes:.0f}), karena sebaran likes "
+            "sangat condong dan beberapa postingan viral membuat selisih besar."
+        )
+
+        g1, g2 = st.columns(2)
+        with g1:
+            st.markdown("**Korelasi likes, reply, dan retweet**")
+            st.altair_chart(grafik_korelasi(korelasi), width="stretch")
+        with g2:
+            st.markdown("**Likes aktual vs prediksi (data uji)**")
+            if ev is None:
+                st.caption("Grafik ini tersedia setelah dataset memuat `reply_count` dan `retweet_count`.")
+            else:
+                simetris = st.checkbox("Skala simetris-log (lebih jelas untuk nilai kecil)", value=False)
+                skala = alt.Scale(type="symlog") if simetris else alt.Scale()
+                hasil = ev["hasil"]
+                batas = [min(hasil["aktual"].min(), hasil["prediksi"].min()),
+                         max(hasil["aktual"].max(), hasil["prediksi"].max())]
+                titik = alt.Chart(hasil.reset_index(drop=True)).mark_circle(size=60, opacity=0.6, color="#2E8B57").encode(
+                    x=alt.X("aktual:Q", title="Likes aktual", scale=skala),
+                    y=alt.Y("prediksi:Q", title="Prediksi likes", scale=skala),
+                    tooltip=[alt.Tooltip("aktual:Q"), alt.Tooltip("prediksi:Q", format=".1f"),
+                             "reply_count", "retweet_count"],
+                )
+                garis = alt.Chart(pd.DataFrame({"x": batas, "y": batas})).mark_line(
+                    color="#D1495B", strokeDash=[6, 4]).encode(x="x:Q", y="y:Q")
+                st.altair_chart(titik + garis, width="stretch")
+                st.caption("Garis putus-putus merah: prediksi sempurna (aktual = prediksi).")
+
+        if ev is not None:
+            with st.expander("Lihat data uji beserta selisih prediksi"):
+                tabel = ev["hasil"].sort_values("selisih", key=np.abs, ascending=False)
+                st.dataframe(
+                    tabel[["text", "reply_count", "retweet_count", "aktual", "prediksi", "selisih"]],
+                    hide_index=True, width="stretch",
+                    column_config={
+                        "text": st.column_config.TextColumn("Postingan", width="large"),
+                        "reply_count": "Reply", "retweet_count": "Retweet",
+                        "aktual": "Likes aktual",
+                        "prediksi": st.column_config.NumberColumn("Prediksi", format="%.1f"),
+                        "selisih": st.column_config.NumberColumn("Selisih (prediksi − aktual)", format="%.1f"),
+                    },
+                )
