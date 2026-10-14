@@ -2,8 +2,7 @@
 Dashboard Analisis Sentimen dan Tema Pembahasan Penggunaan AI untuk Membuat
 dan Menyelesaikan Tugas pada Postingan X Berbahasa Indonesia.
 
-Versi saat ini: tab Data, Sentimen, dan Regresi.
-(Tab Clustering akan ditambahkan kemudian.)
+Tab: Data, Sentimen, Clustering, dan Regresi.
 
 Jalankan:  streamlit run app.py
 """
@@ -15,8 +14,10 @@ import altair as alt
 import numpy as np
 import pandas as pd
 import streamlit as st
+from sklearn.decomposition import PCA
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.metrics import mean_absolute_error, r2_score, silhouette_samples, silhouette_score
 from sklearn.model_selection import train_test_split
 
 # --------------------------------------------------------------------------
@@ -26,7 +27,11 @@ BASE = Path(__file__).parent
 PATH_CLEAN = BASE / "data" / "data_clean.csv"
 PATH_SENTIMENT = BASE / "data" / "data_sentiment.csv"
 PATH_EVAL = BASE / "data" / "evaluasi_sentiment.csv"
+PATH_CLUSTER = BASE / "data" / "hasil_clustering.csv"
 PATH_MODEL = BASE / "model" / "model_regresi_ai.joblib"
+
+# Warna cluster dibuat berbeda dari warna sentimen agar tidak tertukar.
+WARNA_CLUSTER = ["#4C78A8", "#F58518", "#B279A2", "#72B7B2", "#E45756"]
 
 # Regresi: X1 = reply_count, X2 = retweet_count, Y = like_count (sesuai notebook)
 FITUR_REGRESI = ["reply_count", "retweet_count"]
@@ -125,6 +130,74 @@ def grafik_batang_kata(df_kata: pd.DataFrame, warna: str) -> alt.Chart:
     )
 
 
+@st.cache_data(show_spinner="Menghitung ruang fitur cluster...")
+def analisis_cluster(path: str):
+    """Muat hasil clustering lalu hitung kata dominan, silhouette, dan proyeksi PCA.
+
+    Hanya membutuhkan kolom `text`, `clean_cluster`, `cluster` (opsional: `tema`).
+    TF-IDF memakai pengaturan yang sama dengan notebook (max_df=0.8, min_df=2).
+    """
+    p = Path(path)
+    if not p.exists():
+        return None
+    d = _baca_csv(p)
+    if not {"text", "clean_cluster", "cluster"}.issubset(d.columns):
+        return None
+    d = d.dropna(subset=["clean_cluster"]).reset_index(drop=True)
+    d["cluster"] = d["cluster"].astype(int)
+
+    vec = TfidfVectorizer(max_df=0.8, min_df=2)
+    X = vec.fit_transform(d["clean_cluster"]).toarray()
+    labels = d["cluster"].to_numpy()
+    ids = sorted(d["cluster"].unique().tolist())
+    istilah = vec.get_feature_names_out()
+
+    pusat = np.vstack([X[labels == i].mean(axis=0) for i in ids])   # pusat cluster = rata-rata TF-IDF
+    posisi = {i: k for k, i in enumerate(ids)}
+    d["jarak"] = np.linalg.norm(X - pusat[[posisi[i] for i in labels]], axis=1)
+
+    kata = {}
+    for i in ids:
+        urut = np.argsort(pusat[posisi[i]])[::-1][:10]
+        kata[i] = pd.DataFrame({"kata": istilah[urut], "bobot": pusat[posisi[i]][urut]})
+
+    sil, sil_cluster = None, {}
+    if len(ids) >= 2 and len(d) > len(ids):
+        sil = float(silhouette_score(X, labels))
+        sampel = silhouette_samples(X, labels)
+        sil_cluster = {i: float(sampel[labels == i].mean()) for i in ids}
+
+    pca = PCA(n_components=2, random_state=0).fit(X)
+    xy = pca.transform(X)
+    d["pca1"], d["pca2"] = xy[:, 0], xy[:, 1]
+    xy_pusat = pca.transform(pusat)
+    titik_pusat = pd.DataFrame({"cluster": [f"Cluster {i}" for i in ids],
+                                "pca1": xy_pusat[:, 0], "pca2": xy_pusat[:, 1]})
+
+    if "tema" in d.columns:
+        d["tema_pendek"] = d["tema"].astype(str).str.replace(r"\s*\(.*\)\s*$", "", regex=True)
+    else:
+        d["tema_pendek"] = "Cluster " + d["cluster"].astype(str)
+    d["nama"] = "Cluster " + d["cluster"].astype(str)
+
+    return {"data": d, "ids": ids, "kata": kata, "silhouette": sil, "sil_cluster": sil_cluster,
+            "titik_pusat": titik_pusat, "var_pca": float(pca.explained_variance_ratio_.sum()),
+            "n_fitur": int(X.shape[1])}
+
+
+def grafik_bobot_kata(df_kata: pd.DataFrame, warna: str) -> alt.Chart:
+    return (
+        alt.Chart(df_kata)
+        .mark_bar(color=warna)
+        .encode(
+            x=alt.X("bobot:Q", title="Bobot TF-IDF (pusat cluster)"),
+            y=alt.Y("kata:N", sort="-x", title=None),
+            tooltip=["kata", alt.Tooltip("bobot:Q", format=".3f")],
+        )
+        .properties(height=alt.Step(22))
+    )
+
+
 @st.cache_resource(show_spinner=False)
 def muat_model(path: str):
     """Muat model regresi tersimpan (joblib). Mengembalikan None bila gagal."""
@@ -214,6 +287,7 @@ if not PATH_CLEAN.exists():
 
 df = muat_data(str(PATH_CLEAN))
 df_sent = muat_sentimen(str(PATH_SENTIMENT))
+hasil_cluster = analisis_cluster(str(PATH_CLUSTER))
 model_reg = muat_model(str(PATH_MODEL))
 ada_data_regresi = set(FITUR_REGRESI + [TARGET_REGRESI]).issubset(df.columns)
 
@@ -227,10 +301,11 @@ with st.sidebar:
     st.markdown(f"- Data bersih: {'✅' if PATH_CLEAN.exists() else '❌'}")
     st.markdown(f"- Hasil sentimen: {'✅' if df_sent is not None else '❌ belum ada'}")
     st.markdown(f"- Evaluasi sentimen: {'✅' if PATH_EVAL.exists() else '❌ belum ada'}")
+    st.markdown(f"- Hasil clustering: {'✅' if hasil_cluster is not None else '❌ belum ada'}")
     st.markdown(f"- Model regresi: {'✅' if model_reg is not None else '❌ belum ada'}")
     st.markdown(f"- Data reply/retweet: {'✅' if ada_data_regresi else '❌ belum ada'}")
 
-tab_data, tab_sentimen, tab_regresi = st.tabs(["Data", "Sentimen", "Regresi"])
+tab_data, tab_sentimen, tab_cluster, tab_regresi = st.tabs(["Data", "Sentimen", "Clustering", "Regresi"])
 
 # ==========================================================================
 # TAB DATA
@@ -513,6 +588,156 @@ with tab_sentimen:
         st.caption(
             "Catatan: label sentimen berasal dari model pre-trained, sehingga dapat keliru pada "
             "bahasa gaul, singkatan, sarkasme, dan teks yang memuat beberapa target opini sekaligus."
+        )
+
+
+# ==========================================================================
+# TAB CLUSTERING
+# ==========================================================================
+with tab_cluster:
+    if hasil_cluster is None:
+        st.info(
+            "Hasil clustering belum tersedia. Jalankan sekali:\n\n"
+            "```bash\npip install -r requirements-label.txt\npython cluster_teks.py\n```\n\n"
+            "Skrip akan membuat `data/hasil_clustering.csv` (kolom `text`, `clean_cluster`, `cluster`, `tema`), "
+            "lalu muat ulang halaman ini. File `hasil_clustering.csv` dari notebook juga dapat dipakai langsung."
+        )
+    else:
+        dc = hasil_cluster["data"]
+        if "like_count" not in dc.columns:   # berkas clustering minimal: ambil likes dari data utama
+            dc["like_count"] = dc["text"].map(df.drop_duplicates("text").set_index("text")["like_count"])
+        ids = hasil_cluster["ids"]
+        sil = hasil_cluster["silhouette"]
+        warna_c = {f"Cluster {i}": WARNA_CLUSTER[k % len(WARNA_CLUSTER)] for k, i in enumerate(ids)}
+        skala_c = alt.Scale(domain=list(warna_c), range=list(warna_c.values()))
+        if df_sent is not None:
+            dc["sentimen"] = dc["text"].map(df_sent.drop_duplicates("text").set_index("text")["sentimen"])
+
+        st.subheader("Kelompok tema pembahasan")
+        st.markdown(
+            "Postingan dikelompokkan berdasarkan kemiripan kata memakai **TF-IDF** dan **K-Means** "
+            f"({len(ids)} cluster). Teks dibersihkan lebih lanjut (normalisasi slang, penghapusan stopword, "
+            "stemming) sebelum dikelompokkan."
+        )
+
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Postingan dikelompokkan", f"{len(dc)}")
+        k2.metric("Jumlah fitur (kata)", f"{hasil_cluster['n_fitur']}")
+        k3.metric("Skor silhouette", f"{sil:.3f}" if sil is not None else "-",
+                  help="Mengukur seberapa jelas cluster terpisah: −1 s.d. 1. Makin tinggi makin tegas.")
+        if sil is not None and sil < 0.25:
+            st.warning(
+                f"Skor silhouette {sil:.3f} sangat rendah (di bawah 0,25 umumnya dianggap tidak ada struktur "
+                "cluster yang jelas). Cluster saling tumpang tindih, jadi tema di bawah lebih tepat dibaca "
+                "sebagai kecenderungan gaya pembahasan, bukan kelompok yang terpisah tegas."
+            )
+
+        # ---- ukuran & ciri tiap cluster
+        st.divider()
+        st.subheader("Ciri utama setiap cluster")
+        ukuran = dc["nama"].value_counts().reindex(list(warna_c)).fillna(0).astype(int)
+        kolom = st.columns(len(ids))
+        for kol, i in zip(kolom, ids):
+            sub = dc[dc["cluster"] == i]
+            with kol:
+                with st.container(border=True):
+                    st.markdown(f"**Cluster {i}**")
+                    st.write(sub["tema_pendek"].iloc[0])
+                    st.metric("Jumlah postingan", f"{len(sub)}",
+                              f"{len(sub) / len(dc) * 100:.1f}% dari total", delta_color="off")
+                    st.caption(f"Median likes: {sub['like_count'].median():.0f}"
+                               + (f" · silhouette: {hasil_cluster['sil_cluster'][i]:.2f}"
+                                  if i in hasil_cluster["sil_cluster"] else ""))
+                    st.caption("Kata dominan: " + ", ".join(hasil_cluster["kata"][i]["kata"].head(5)))
+
+        top5 = [k for i in ids for k in hasil_cluster["kata"][i]["kata"].head(5)]
+        tumpang = sorted(k for k, n in Counter(top5).items() if n > 1)
+        if tumpang:
+            st.caption("Kata yang muncul di lebih dari satu cluster (lima kata teratas): "
+                       + ", ".join(tumpang) + ". Ini salah satu sebab cluster saling tumpang tindih.")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**Jumlah postingan per cluster**")
+            df_uk = pd.DataFrame({"cluster": ukuran.index, "jumlah": ukuran.values})
+            st.altair_chart(
+                alt.Chart(df_uk).mark_bar().encode(
+                    x=alt.X("cluster:N", title=None, axis=alt.Axis(labelAngle=0)),
+                    y=alt.Y("jumlah:Q", title="Jumlah postingan"),
+                    color=alt.Color("cluster:N", scale=skala_c, legend=None),
+                    tooltip=["cluster", "jumlah"],
+                ),
+                width="stretch",
+            )
+        with c2:
+            if "sentimen" in dc.columns and dc["sentimen"].notna().any():
+                st.markdown("**Komposisi sentimen per cluster**")
+                kom = dc.dropna(subset=["sentimen"]).groupby(["nama", "sentimen"]).size().reset_index(name="jumlah")
+                st.altair_chart(
+                    alt.Chart(kom).mark_bar().encode(
+                        x=alt.X("nama:N", title=None, axis=alt.Axis(labelAngle=0)),
+                        y=alt.Y("jumlah:Q", stack="normalize", title="Proporsi", axis=alt.Axis(format="%")),
+                        color=alt.Color("sentimen:N", scale=SKALA_WARNA, title="Sentimen"),
+                        tooltip=["nama", "sentimen", "jumlah"],
+                    ),
+                    width="stretch",
+                )
+            else:
+                st.markdown("**Komposisi sentimen per cluster**")
+                st.caption("Tersedia setelah hasil pelabelan sentimen dibuat (lihat tab Sentimen).")
+
+        # ---- kata dominan
+        st.divider()
+        st.subheader("Kata dominan per cluster")
+        kolom = st.columns(len(ids))
+        for kol, i in zip(kolom, ids):
+            with kol:
+                st.markdown(f"**Cluster {i}**")
+                st.altair_chart(grafik_bobot_kata(hasil_cluster["kata"][i], warna_c[f"Cluster {i}"]),
+                                width="stretch")
+
+        # ---- contoh postingan
+        st.divider()
+        st.subheader("Contoh postingan")
+        pilih = st.radio("Pilih cluster", ids, format_func=lambda i: f"Cluster {i}", horizontal=True)
+        sub = dc[dc["cluster"] == pilih].sort_values("jarak")
+        st.caption(f"**{sub['tema_pendek'].iloc[0]}** · 3 postingan paling dekat dengan pusat cluster "
+                   "(paling mewakili):")
+        konfigurasi = {
+            "text": st.column_config.TextColumn("Postingan", width="large"),
+            "like_count": "Likes",
+            "jarak": st.column_config.NumberColumn("Jarak ke pusat", format="%.3f"),
+        }
+        st.dataframe(sub[["text", "like_count", "jarak"]].head(3), hide_index=True, width="stretch",
+                     column_config=konfigurasi)
+        with st.expander(f"Semua {len(sub)} postingan di Cluster {pilih}"):
+            st.dataframe(sub[["text", "like_count", "jarak"]], hide_index=True, width="stretch",
+                         column_config=konfigurasi)
+
+        # ---- PCA
+        st.divider()
+        st.subheader("Visualisasi cluster (PCA 2D)")
+        titik = alt.Chart(dc.assign(cuplikan=dc["text"].str.slice(0, 140))).mark_circle(size=70, opacity=0.7).encode(
+            x=alt.X("pca1:Q", title="Komponen utama 1"),
+            y=alt.Y("pca2:Q", title="Komponen utama 2"),
+            color=alt.Color("nama:N", scale=skala_c, title="Cluster"),
+            tooltip=["nama", "tema_pendek", "cuplikan", "like_count"],
+        )
+        pusat = alt.Chart(hasil_cluster["titik_pusat"]).mark_point(
+            shape="cross", size=250, strokeWidth=3, color="black").encode(x="pca1:Q", y="pca2:Q",
+                                                                          tooltip=["cluster"])
+        st.altair_chart((titik + pusat).properties(height=420), width="stretch")
+        st.caption(
+            f"Dua komponen utama hanya menangkap {hasil_cluster['var_pca'] * 100:.1f}% variasi data, "
+            "sehingga tumpang tindih pada gambar tidak sepenuhnya mencerminkan jarak sebenarnya. "
+            "Tanda silang hitam adalah pusat cluster."
+        )
+
+        st.download_button(
+            "Unduh hasil clustering (CSV)",
+            dc.drop(columns=[c for c in ("jarak", "pca1", "pca2", "tema_pendek", "nama", "sentimen")
+                             if c in dc.columns]).to_csv(index=False).encode("utf-8"),
+            file_name="hasil_clustering.csv", mime="text/csv",
         )
 
 

@@ -1,4 +1,7 @@
-# Hanya untuk menjalankan label_sentiment.py (pelabelan sentimen, sekali jalan)
+# Untuk menjalankan label_sentiment.py (pelabelan sentimen) dan cluster_teks.py (clustering teks)
 pandas>=2.0
+scikit-learn>=1.6
 transformers>=4.40
 torch>=2.2
+Sastrawi>=1.0.1
+nltk>=3.8
